@@ -24,7 +24,7 @@ class Network:
         self.sig = 0  # initial activity noise
         self.z0 = np.zeros((Ntot, 1))  # initial condition
         self.xa, self.ha, self.ua = [], [], []  # input, activity, output
-        self.ws = (2 * npr.random((Ntot, S)) - 1)/sqrt(S)  # input weights
+        self.ws = np.ones((Ntot, S))/sqrt(S)  # input weights
         self.ws[:Ml, 0] = 0
         self.ws[Ml:Nl, 1] = 0
         self.ws[Nl:(Nl+Mr), 1] = 0

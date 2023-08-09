@@ -1,15 +1,12 @@
 import numpy as np
 import numpy.random as npr
 import torch
+import matplotlib
 from matplotlib import pyplot as plt
-from matplotlib.gridspec import GridSpec
 from itertools import cycle
-from model import Network, Task, Algorithm
 from sklearn.decomposition import PCA
 from sklearn.linear_model import LinearRegression
-from sklearn.linear_model import Ridge
 from scipy.stats import bernoulli, norm
-from scipy.ndimage.filters import uniform_filter1d
 
 
 def compute_posterior(task, s):
@@ -46,6 +43,14 @@ def softmax(x, lam, axis=-1):
 
 def logit(p):
     return np.log10(p / (1 - p))
+
+
+def movmean(x, winsize, adapt=True):
+    if adapt:
+        x_mean = [x[idx - np.min((idx, winsize)):idx].mean() for idx in np.arange(len(x))]
+    else:
+        x_mean = [x[idx-winsize:idx].mean() for idx in np.arange(winsize, len(x))]
+    return x_mean
 
 
 def train(net, task, algo, learningsites=('ws', 'J', 'wr'), seed=1):
@@ -231,7 +236,7 @@ def test(net, task, lesion=False, lesion_module='L', Ntrials=1000, seed=1):
     return testing
 
 
-def retrain(net, task, lesion_module='R', Ntrials=1000, seed=1):
+def retrain(net, task, lesion_module='R', Ntrials=1000, lr=.5, seed=1):
 
     # set random seed
     npr.seed(seed)
@@ -246,7 +251,7 @@ def retrain(net, task, lesion_module='R', Ntrials=1000, seed=1):
     n_samples, NT_sample = task.n_samples, task.NT_sample
 
     # track variables during learning
-    testing = {'stim': [], 'input': [], 'hidden': [], 'output': [], 'loss': []}
+    learning = {'stim': [], 'input': [], 'hidden': [], 'output': [], 'loss': [], 'lr': []}
 
     for ei in range(Ntrials):
 
@@ -298,96 +303,172 @@ def retrain(net, task, lesion_module='R', Ntrials=1000, seed=1):
         # update weights
         if lesion_module == 'R':
             err = ustar[-10:].mean() - ua[-10:, 0].mean()
-            net.wr[0] += .5 * h.flatten() * err
+            net.wr[0] += lr * h.flatten() * err
         elif lesion_module == 'L':
             err = ustar[-10:].mean() - ua[-10:, 1].mean()
-            net.wr[1] += .5 * h.flatten() * err
-        testing['loss'].append(err ** 2)
+            net.wr[1] += lr * h.flatten() * err
+        learning['loss'].append(err ** 2)
 
         # save mse list and cond list
-        testing['stim'].append(stim)
-        testing['input'].append(sa.detach().numpy())
-        testing['hidden'].append(ha.detach().numpy())
-        testing['output'].append(ua.detach().numpy())
+        learning['stim'].append(stim)
+        learning['input'].append(sa.detach().numpy())
+        learning['hidden'].append(ha.detach().numpy())
+        learning['output'].append(ua.detach().numpy())
 
         # print loss
-        print('\r' + str(ei + 1) + '/' + str(Ntrials) + '\t Err:' + str(testing['loss'][-1].detach().numpy()), end='')
+        print('\r' + str(ei + 1) + '/' + str(Ntrials) + '\t Err:' + str(learning['loss'][-1].detach().numpy()), end='')
 
     # convert to numpy array
-    testing['stim'] = np.array(testing['stim'])
-    testing['input'] = np.array([testing['input'][idx] for idx in range(Ntrials)])
-    testing['hidden'] = np.array([testing['hidden'][idx] for idx in range(Ntrials)])
-    testing['output'] = np.array([testing['output'][idx] for idx in range(Ntrials)])
+    learning['stim'] = np.array(learning['stim'])
+    learning['input'] = np.array([learning['input'][idx] for idx in range(Ntrials)])
+    learning['hidden'] = np.array([learning['hidden'][idx] for idx in range(Ntrials)])
+    learning['output'] = np.array([learning['output'][idx] for idx in range(Ntrials)])
+    learning['loss'] = np.array(learning['loss'])
+    learning['lr'] = lr
 
-    return testing
+    return net, learning
 
 
-def plot(data):
-    model = data['net']
-    conds = ['prelesion', 'lesionR', 'lesionL']
-    for cond in conds:
-        stim, input, hidden, output = \
-            data[cond]['stim'], data[cond]['input'], data[cond]['hidden'], data[cond]['output']
-        output = (output[:, :, 0] - output[:, :, 1])[:, :, None]
-        stims = np.unique(stim)
-        Ntrials, NT = np.shape(hidden)[:2]
-        N, Nl, Nr = model.N, model.Nl, model.Nr
-        clrs = ['blue', 'blue', 'blue', 'Grey', 'red', 'red', 'red']
-        alphas = (2/(len(stims)-1)) * np.abs(np.arange(len(stims)) - ((len(stims)-1)/2))
-        alphas[int((len(stims)-1)/2)] = 1
-        # plot trials
-        fig = plt.figure(figsize=(16, 8), dpi=80)
-        gs = fig.add_gridspec(7, 8)
-        for idx in range(len(stims)):
-            trlindx = (stim == stims[idx])
-            fig.add_subplot(gs[idx, 0])
-            plt.plot(input[trlindx, :, :].sum(axis=2).T, color=clrs[idx], alpha=alphas[idx], linewidth=.02)
-            plt.plot(input[trlindx, :, :].sum(axis=2).mean(axis=0), color=clrs[idx], linewidth=2)
-            plt.xticks([]), plt.yticks([]), plt.ylim((-0.5, 0.5))
-            if idx == 0:
-                plt.title('Input', fontsize=14)
-            fig.add_subplot(gs[idx, 1])
-            pca = PCA(n_components=1)
-            hidden_pc = pca.fit_transform(np.reshape(hidden[:, :, :Nl], [Ntrials*NT, Nl]))
-            hidden_pc = np.reshape(hidden_pc, [Ntrials, NT, 1])
-            plt.plot(hidden_pc[trlindx, :, 0].T, color=clrs[idx], alpha=alphas[idx], linewidth=.02)
-            plt.plot(hidden_pc[trlindx, :, 0].mean(axis=0), color=clrs[idx], alpha=alphas[idx], linewidth=2)
-            plt.xticks([]), plt.yticks([]), plt.ylim(-2, 2)
-            if idx == 0:
-                plt.title('Left Hem.', fontsize=14)
-            fig.add_subplot(gs[idx, 2])
-            pca = PCA(n_components=1)
-            hidden_pc = pca.fit_transform(np.reshape(hidden[:, :, Nl:], [Ntrials*NT, Nl]))
-            hidden_pc = np.reshape(hidden_pc, [Ntrials, NT, 1])
-            plt.plot(hidden_pc[trlindx, :, 0].T, color=clrs[idx], alpha=alphas[idx], linewidth=.02)
-            plt.plot(hidden_pc[trlindx, :, 0].mean(axis=0), color=clrs[idx], alpha=alphas[idx], linewidth=2)
-            plt.xticks([]), plt.yticks([]), plt.ylim(-2, 2)
-            if idx == 0:
-                plt.title('Right Hem.', fontsize=14)
-            fig.add_subplot(gs[idx, 3])
-            plt.plot(output[trlindx, :, :].sum(axis=2).T, color=clrs[idx], alpha=alphas[idx], linewidth=.02)
-            plt.plot(output[trlindx, :, :].sum(axis=2).mean(axis=0), color=clrs[idx], linewidth=2)
-            plt.xticks([]), plt.yticks([]), plt.ylim((-3, 3))
-            if idx == 0:
-                plt.title('Output', fontsize=14)
-        fig.add_subplot(gs[:, 5:])
-        llrs = [output[stim == stims[idx], :, :].sum(axis=2)[:, -20:].mean(axis=1).mean() for idx in range(len(stims))]
-        beliefs = llr2belief(llrs, 4)
-        plt.plot(stims, beliefs, 'k')
-        [plt.plot(stims[idx], beliefs[idx], 'o', color=clrs[idx], alpha=alphas[idx]) for idx in range(len(stims))]
+def plot(data, data_relearn, plottype):
+    if plottype == 'lesion':
+        model = data['net']
+        conds = ['prelesion', 'lesionR', 'lesionL']
+        for cond in conds:
+            stim, input, hidden, output = \
+                data[cond]['stim'], data[cond]['input'], data[cond]['hidden'], data[cond]['output']
+            output = (output[:, :, 0] - output[:, :, 1])[:, :, None]
+            stims = np.unique(stim)
+            Ntrials, NT = np.shape(hidden)[:2]
+            N, Nl, Nr = model.N, model.Nl, model.Nr
+            clrs = ['blue', 'blue', 'blue', 'Grey', 'red', 'red', 'red']
+            alphas = (2/(len(stims)-1)) * np.abs(np.arange(len(stims)) - ((len(stims)-1)/2))
+            alphas[int((len(stims)-1)/2)] = 1
+            # plot trials
+            fig = plt.figure(figsize=(16, 8), dpi=80)
+            gs = fig.add_gridspec(7, 8)
+            for idx in range(len(stims)):
+                trlindx = (stim == stims[idx])
+                fig.add_subplot(gs[idx, 0])
+                plt.plot(input[trlindx, :, :].sum(axis=2).T, color=clrs[idx], alpha=alphas[idx], linewidth=.02)
+                plt.plot(input[trlindx, :, :].sum(axis=2).mean(axis=0), color=clrs[idx], linewidth=2)
+                plt.xticks([]), plt.yticks([]), plt.ylim((-0.5, 0.5))
+                if idx == 0:
+                    plt.title('Input', fontsize=14)
+                fig.add_subplot(gs[idx, 1])
+                pca = PCA(n_components=1)
+                hidden_pc = pca.fit_transform(np.reshape(hidden[:, :, :Nl], [Ntrials*NT, Nl]))
+                hidden_pc = np.reshape(hidden_pc, [Ntrials, NT, 1])
+                plt.plot(hidden_pc[trlindx, :, 0].T, color=clrs[idx], alpha=alphas[idx], linewidth=.02)
+                plt.plot(hidden_pc[trlindx, :, 0].mean(axis=0), color=clrs[idx], alpha=alphas[idx], linewidth=2)
+                plt.xticks([]), plt.yticks([]), plt.ylim(-2, 2)
+                if idx == 0:
+                    plt.title('Left Hem.', fontsize=14)
+                fig.add_subplot(gs[idx, 2])
+                pca = PCA(n_components=1)
+                hidden_pc = pca.fit_transform(np.reshape(hidden[:, :, Nl:], [Ntrials*NT, Nl]))
+                hidden_pc = np.reshape(hidden_pc, [Ntrials, NT, 1])
+                plt.plot(hidden_pc[trlindx, :, 0].T, color=clrs[idx], alpha=alphas[idx], linewidth=.02)
+                plt.plot(hidden_pc[trlindx, :, 0].mean(axis=0), color=clrs[idx], alpha=alphas[idx], linewidth=2)
+                plt.xticks([]), plt.yticks([]), plt.ylim(-2, 2)
+                if idx == 0:
+                    plt.title('Right Hem.', fontsize=14)
+                fig.add_subplot(gs[idx, 3])
+                plt.plot(output[trlindx, :, :].sum(axis=2).T, color=clrs[idx], alpha=alphas[idx], linewidth=.02)
+                plt.plot(output[trlindx, :, :].sum(axis=2).mean(axis=0), color=clrs[idx], linewidth=2)
+                plt.xticks([]), plt.yticks([]), plt.ylim((-3, 3))
+                if idx == 0:
+                    plt.title('Output', fontsize=14)
+            fig.add_subplot(gs[:, 5:])
+            llrs = [output[stim == stims[idx], :, :].sum(axis=2)[:, -20:].mean(axis=1).mean() for idx in range(len(stims))]
+            beliefs = llr2belief(llrs, scale=4)
+            plt.plot(stims, beliefs, 'k')
+            [plt.plot(stims[idx], beliefs[idx], 'o', color=clrs[idx], alpha=alphas[idx]) for idx in range(len(stims))]
+            plt.ylim((0, 1))
+            plt.xlabel('Average input', fontsize=14), plt.ylabel('Posterior probability', fontsize=14)
+            plt.show()
+        fig = plt.figure(figsize=(8, 8), dpi=80)
+        clrs = ['k', 'b', 'r']
+        for cond, clr in zip(conds, clrs):
+            stim, output = data[cond]['stim'], data[cond]['output']
+            output = (output[:, :, 0] - output[:, :, 1])[:, :, None]
+            stims = np.unique(stim)
+            llrs = [output[stim == stims[idx], :, :].sum(axis=2)[:, -20:].mean(axis=1).mean() for idx in range(len(stims))]
+            beliefs = llr2belief(llrs, scale=4)
+            plt.plot(stims, beliefs, color=clr, label=cond)
+            plt.plot(stims, beliefs, 'o', color=clr)
+        plt.legend()
         plt.ylim((0, 1))
         plt.xlabel('Average input', fontsize=14), plt.ylabel('Posterior probability', fontsize=14)
         plt.show()
-    fig = plt.figure(figsize=(8, 8), dpi=80)
-    clrs = ['k', 'b', 'r']
-    for cond, clr in zip(conds, clrs):
-        stim, input, hidden, output = \
-            data[cond]['stim'], data[cond]['input'], data[cond]['hidden'], data[cond]['output']
+    elif plottype == 'lesion_slow':
+        Ntrials = np.shape(data_relearn['learning_lesionR']['loss'])[0]
+        smoothwin=300
+        plt.figure(figsize=(12, 8), dpi=80)
+        plt.subplot(2, 3, 1)
+        plt.plot(movmean(data_relearn['learning_lesionR']['loss'], smoothwin)[int(.1*smoothwin):], 'b')
+        plt.axvspan(xmin=int(Ntrials*.8-.1*smoothwin), xmax=(Ntrials-.1*smoothwin), facecolor='b', alpha=0.5)
+        plt.xlabel('Trial', fontsize=14), plt.ylabel('Error', fontsize=14)
+        plt.subplot(2, 3, 2)
+        stim, output = data_relearn['prelesion']['stim'], data_relearn['prelesion']['output']
         output = (output[:, :, 0] - output[:, :, 1])[:, :, None]
+        stims = np.unique(stim)
         llrs = [output[stim == stims[idx], :, :].sum(axis=2)[:, -20:].mean(axis=1).mean() for idx in range(len(stims))]
-        beliefs = llr2belief(llrs, 4)
-        plt.plot(stims, beliefs, color=clr)
-        plt.plot(stims, beliefs, 'o', color=clr)
-    plt.ylim((0, 1))
-    plt.xlabel('Average input', fontsize=14), plt.ylabel('Posterior probability', fontsize=14)
-    plt.show()
+        beliefs = llr2belief(llrs, scale=4)
+        plt.plot(stims, beliefs, color='k', label='prelesion')
+        plt.plot(stims, beliefs, 'o', color='k')
+        stim, output = data_relearn['lesionR']['stim'], data_relearn['lesionR']['output']
+        output = (output[:, :, 0] - output[:, :, 1])[:, :, None]
+        stims = np.unique(stim)
+        llrs = [output[stim == stims[idx], :, :].sum(axis=2)[:, -20:].mean(axis=1).mean() for idx in range(len(stims))]
+        beliefs = llr2belief(llrs, scale=4)
+        plt.plot(stims, beliefs, color='b', label='lesionR')
+        plt.plot(stims, beliefs, 'o', color='b')
+        stim, output = data_relearn['learning_lesionR']['stim'][-1000:], data_relearn['learning_lesionR']['output'][-1000:]
+        output = (output[:, :, 0] - output[:, :, 1])[:, :, None]
+        stims = np.unique(stim)
+        llrs = [output[stim == stims[idx], :, :].sum(axis=2)[:, -20:].mean(axis=1).mean() for idx in range(len(stims))]
+        beliefs = llr2belief(llrs, scale=4)
+        plt.plot(stims, beliefs, color='b', alpha=.5, label='lesionR_compensate')
+        plt.plot(stims, beliefs, 'o', color='b', alpha=.5)
+        plt.legend()
+        plt.ylim((0, 1))
+        plt.xlabel('Average input', fontsize=14), plt.ylabel('Posterior probability', fontsize=14)
+        plt.subplot(2, 3, 3)
+        plt.plot(data['net'].wr[0, :10], data_relearn['net_lesionR'].wr[0, :10], '.b', alpha=.5)
+        plt.plot(data['net'].wr[0, 10:40], data_relearn['net_lesionR'].wr[0, 10:40], 'xb', alpha=.5)
+        # plt.axis([-6, 6, -6, 6])
+        plt.subplot(2, 3, 4)
+        plt.plot(movmean(data_relearn['learning_lesionL']['loss'], smoothwin)[int(.1*smoothwin):], 'r')
+        plt.axvspan(xmin=int(Ntrials*.8-.1*smoothwin), xmax=(Ntrials-.1*smoothwin), facecolor='r', alpha=0.5)
+        plt.xlabel('Trial', fontsize=14), plt.ylabel('Error', fontsize=14)
+        plt.subplot(2, 3, 5)
+        stim, output = data_relearn['prelesion']['stim'], data_relearn['prelesion']['output']
+        output = (output[:, :, 0] - output[:, :, 1])[:, :, None]
+        stims = np.unique(stim)
+        llrs = [output[stim == stims[idx], :, :].sum(axis=2)[:, -20:].mean(axis=1).mean() for idx in range(len(stims))]
+        beliefs = llr2belief(llrs, scale=4)
+        plt.plot(stims, beliefs, color='k', label='prelesion')
+        plt.plot(stims, beliefs, 'o', color='k')
+        stim, output = data_relearn['lesionL']['stim'], data_relearn['lesionL']['output']
+        output = (output[:, :, 0] - output[:, :, 1])[:, :, None]
+        stims = np.unique(stim)
+        llrs = [output[stim == stims[idx], :, :].sum(axis=2)[:, -20:].mean(axis=1).mean() for idx in range(len(stims))]
+        beliefs = llr2belief(llrs, scale=4)
+        plt.plot(stims, beliefs, color='r', label='lesionL')
+        plt.plot(stims, beliefs, 'o', color='r')
+        stim, output = data_relearn['learning_lesionL']['stim'][-1000:], data_relearn['learning_lesionL']['output'][-1000:]
+        output = (output[:, :, 0] - output[:, :, 1])[:, :, None]
+        stims = np.unique(stim)
+        llrs = [output[stim == stims[idx], :, :].sum(axis=2)[:, -20:].mean(axis=1).mean() for idx in range(len(stims))]
+        beliefs = llr2belief(llrs, scale=4)
+        plt.plot(stims, beliefs, color='r', alpha=.5, label='lesionL_compensate')
+        plt.plot(stims, beliefs, 'o', color='r', alpha=.5)
+        plt.legend()
+        plt.ylim((0, 1))
+        plt.xlabel('Average input', fontsize=14), plt.ylabel('Posterior probability', fontsize=14)
+        plt.subplot(2, 3, 6)
+        plt.plot(data['net'].wr[1, 40:50], data_relearn['net_lesionR'].wr[1, 40:50], '.r', alpha=.5)
+        plt.plot(data['net'].wr[1, 50:], data_relearn['net_lesionR'].wr[1, 50:], 'xr', alpha=.5)
+        # plt.axis([-6, 6, -6, 6])
+        plt.tight_layout()
+        plt.show()
